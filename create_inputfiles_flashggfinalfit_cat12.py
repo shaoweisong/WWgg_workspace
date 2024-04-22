@@ -321,7 +321,7 @@ for i in range(len(signal_samples['FHpath'])):
         weight_PTransformer_up = ak.ones_like(event.category)
         weight_PTransformer_down = ak.ones_like(event.category)
         weight_PTransformer_central = ak.ones_like(event.category)
-        Htagger_SF=event.category==5
+        Htagger_SF=event.category==2
         weight_PTransformer_central = ak.where(Htagger_SF, ak.ones_like(weight_PTransformer_central)*HvsQCD_SF[index], weight_PTransformer_central)
         weight_PTransformer_up = ak.where(Htagger_SF, ak.ones_like(weight_PTransformer_up)*HvsQCD_SFup[index], weight_PTransformer_up)
         weight_PTransformer_down = ak.where(Htagger_SF, ak.ones_like(weight_PTransformer_down)*HvsQCD_SFdown[index], weight_PTransformer_down)
