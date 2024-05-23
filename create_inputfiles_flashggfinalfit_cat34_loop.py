@@ -1,27 +1,116 @@
+#/cvmfs/sft.cern.ch/lcg/views/LCG_105/x86_64-el9-gcc11-opt/setup.sh
 import awkward as ak
-from matplotlib import pyplot as plt
+import sys
+debug=True
+import json
+sys.path.append("/eos/user/s/shsong/pkgs_condor/parquet_to_root-0.3.0")
+sys.path.append("/eos/user/s/shsong/pkgs_condor/bayesian-optimization-1.4.3")
+if debug:
+    print(sys.path)
 import numpy as np
 import os
 import vector
-import sys
-sys.path.append("/eos/user/s/shsong/Miniconda/envs/higgsdna/lib/python3.9/site-packages/")
-from skopt import gp_minimize
+from bayes_opt import BayesianOptimization
+from bayes_opt.util import UtilityFunction
 vector.register_awkward()
 import mplhep as hep
 hep.style.use(hep.style.CMS)
 import re
 import pandas as pd
-import xgboost as xgb
 import glob
 from scipy.optimize import minimize
 import argparse
 from parquet_to_root import parquet_to_root
 import random
-import multiprocessing
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import ast
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.preprocessing import StandardScaler
+debug=False
+class MultiClassDNN_model(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(MultiClassDNN_model, self).__init__()
+        self.fc1 = nn.Sequential(nn.Linear(input_size, 128), nn.LeakyReLU(0.01))
+        self.fc2 = nn.Sequential(nn.Linear(128, 128), nn.LeakyReLU(0.01))
+        self.fc3 = nn.Sequential(nn.Linear(128, 128), nn.LeakyReLU(0.01))
+        self.fc4 = nn.Sequential(nn.Linear(128, 64), nn.LeakyReLU(0.01))
+        self.dropout = nn.Dropout(0.5)
+        self.fc5 = nn.Linear(64, output_size)
 
+    def forward(self, x):
+        out = self.fc1(x)
+        out = self.dropout(out)
+        out = self.fc2(out)
+        out = self.dropout(out)
+        out = self.fc3(out)
+        out = self.dropout(out)
+        out = self.fc4(out)
+        out = self.dropout(out)
+        out = self.fc5(out)
+        return F.softmax(out, dim=1)
+    
+def get_fwhm(hist_sig, bin_sig):
+    peak_index = np.argmax(hist_sig)
+    peak_mass = 0.5 * (bin_sig[peak_index] + bin_sig[peak_index + 1])
+    half_max_height = 0.5 * hist_sig[peak_index]
+    left_index = np.where(hist_sig[:peak_index] <= half_max_height)[0][-1]
+    right_index = np.where(hist_sig[peak_index:] <= half_max_height)[0][0] + peak_index
+    fwhm = bin_sig[right_index] - bin_sig[left_index]
+    return fwhm
+def target_function(bo1, bo2,s, b, bkg):
+    if debug:
+        print("bo1: ", bo1)
+        print("bo2: ", bo2)
+    events_sig1 = s[(s['PNN_score'] >= 1-bo1) & (s['PNN_score'] <=1)]
+    events_datasideband_1 = b[(b['PNN_score'] >= 1-bo1) & (b['PNN_score'] <=1)]
+    events_bkg1 = bkg[(bkg['PNN_score'] >= 1-bo1) & (bkg['PNN_score'] <=1)]
+    events_sig2 = s[(s['PNN_score'] >= 1-bo2-bo1) & (s['PNN_score'] <1-bo1)]
+    events_datasideband_2 = b[(b['PNN_score'] >= 1-bo2-bo1) & (b['PNN_score'] <1-bo1)]
+    events_bkg2 = bkg[(bkg['PNN_score'] >= 1-bo2-bo1) & (bkg['PNN_score'] <1-bo1)]
+
+    if len(events_datasideband_1[((events_datasideband_1.Diphoton_mass>135)|(events_datasideband_1.Diphoton_mass<115))]) < 5:
+        significance=0
+        return 0
+    elif len(events_datasideband_2[((events_datasideband_2.Diphoton_mass>135)|(events_datasideband_2.Diphoton_mass<115))]) < 5:
+        significance=0
+        return 0
+    if debug:
+        print("len(events_datasideband_1): ", len(events_datasideband_1))
+        print("len(events_datasideband_2): ", len(events_datasideband_2))
+    # 1
+    # check signal mass distribution
+    hist_sig1, bin_sig1 = np.histogram(np.array(events_sig1['Diphoton_mass']), bins=100, range=(110,150), weights=np.array(events_sig1['weight_central']))
+    if debug:
+        print("hist_sig1: ", hist_sig1)
+        print("bin_sig1: ", bin_sig1)
+    # get signal mass FWHM
+    fwhm1 = get_fwhm(hist_sig1, bin_sig1)
+    # get significance s/sqrt(s+b)
+    s1 = np.sum(events_sig1['weight_central'][(events_sig1['Diphoton_mass'] > 115) & (events_sig1['Diphoton_mass'] < 135)])
+    bkg1_weight = (events_bkg1['weight_central'])[(events_bkg1['Diphoton_mass'] > 115) & (events_bkg1['Diphoton_mass'] < 135)]
+    b1 = np.sum(bkg1_weight) 
+    d1 = np.sum(events_datasideband_1['weight_central'][(events_datasideband_1['Diphoton_mass'] > 135) | (events_datasideband_1['Diphoton_mass'] < 115)])
+    significance1 = s1 / np.sqrt(b1)
+    # significance1 = s1 / np.sqrt(b1)
+    # 2
+    # check signal mass distribution
+    hist_sig2, bin_sig2 = np.histogram(np.array(events_sig2['Diphoton_mass']), bins=100, range=(110,150), weights=np.array(events_sig2['weight_central']))
+    # check signal mass FWHM
+    fwhm2 = get_fwhm(hist_sig2, bin_sig2)
+    # get significance s/sqrt(s+b)
+    s2 = np.sum(events_sig2['weight_central'][(events_sig2['Diphoton_mass'] > 115) & (events_sig2['Diphoton_mass'] < 135)])
+    bkg2_weight = (events_bkg2['weight_central'])[(events_bkg2['Diphoton_mass'] > 115) & (events_bkg2['Diphoton_mass'] < 135)]
+    b2 = np.sum(bkg2_weight) 
+    d2 = np.sum(events_datasideband_2['weight_central'][(events_datasideband_2['Diphoton_mass'] > 135) | (events_datasideband_2['Diphoton_mass'] < 115)])
+    # significance2 = s2 / np.sqrt(b2)
+    significance2 = s2 / np.sqrt(b2)
+
+    significance = np.sqrt(significance1**2 + significance2**2 )
+    fwhm = np.sqrt(fwhm1**2 + fwhm2**2)
+    return significance
 # 自定义函数，将参数字符串转换为列表
 def str_to_list(arg):
     return ast.literal_eval(arg)
@@ -30,11 +119,17 @@ parser.add_argument('--is_HH', type=str, default="False", help='is HH')
 parser.add_argument('--inputFHFiles',type=str_to_list, help='inputFHFiles List')
 parser.add_argument('--inputBKGFiles',type=str_to_list, help='input pp and dd Files List')
 parser.add_argument('--data',type=str,default="/eos/user/s/shsong/HiggsDNA/UL17data/merged_nominal.parquet", help='data file')
-parser.add_argument('--model',type=str,default="/eos/user/z/zhenxuan/PNN_wwgg/PNN_YH_combined/resolved_FHSL/data/XGB_FHSL_resolved.json", help='model file')
+parser.add_argument('--model',type=str,default="/eos/user/z/zhenxuan/PNN_wwgg/PNN_YH_combined/resolved_FHSL/data/simple_DNN_real_epoch_10_mx500_1000_random_mass_noreweight_forsignal/model.pth", help='model file')
+parser.add_argument('--scalar',type=str,default="/eos/user/z/zhenxuan/PNN_wwgg/PNN_YH_combined/resolved_FHSL/data/simple_DNN_real_epoch_10_mx500_1000_random_mass_noreweight_forsignal/scaler_params.json", help='scalar file')
 args = parser.parse_args()
 UL2017data = args.data
 model_path = args.model
+scalar_path = args.scalar
 #/cvmfs/sft.cern.ch/lcg/views/LCG_105/x86_64-el9-gcc11-opt/setup.sh
+def load_trained_model(model_path):
+    print('<load_trained_model> weights_path: ', model_path)
+    model = load_model(model_path, compile=False)
+    return model
 def costheta1(event):
     W1=ak.zip({
     "pt":event['W1_pt'],
@@ -127,7 +222,7 @@ def get_photon_variables(events):
     pho_eta=ak.concatenate([ak.unflatten(events.LeadPhoton_eta,counts=1),ak.unflatten(events.SubleadPhoton_eta,counts=1)],axis=1)
     pho_phi=ak.concatenate([ak.unflatten(events.LeadPhoton_phi,counts=1),ak.unflatten(events.SubleadPhoton_phi,counts=1)],axis=1)
     pho_mass=ak.concatenate([ak.unflatten(events.LeadPhoton_mass,counts=1),ak.unflatten(events.SubleadPhoton_mass,counts=1)],axis=1)
-    photonID=ak.concatenate([ak.unflatten(events.LeadPhoton_mvaID_modified,counts=1),ak.unflatten(events.SubleadPhoton_mvaID_modified,counts=1)],axis=1)
+    photonID=ak.concatenate([ak.unflatten(events.Diphoton_minID_modified,counts=1),ak.unflatten(events.Diphoton_minID_modified,counts=1)],axis=1)
     #sort photonID by max to min
     photonID_sorted = photonID[ak.argsort(photonID,axis=1,ascending=False)]
     events["Diphoton_minID_modified"] = photonID_sorted[:,1]
@@ -446,13 +541,10 @@ def get_met_variables(events):
     events['PuppiMET_pt'] = events['PuppiMET_pt']
     events['PuppiMET_sumEt'] = events['PuppiMET_sumEt']
     return events
-
-
-
 def get_sig_events_forApply(filename,mx,my):
     events = ak.from_parquet(filename)
     category_cut = ((events["category"]==3) | (events["category"]==4))
-    photonID_cut = (events["LeadPhoton_mvaID_modified"]>-0.7)&(events["SubleadPhoton_mvaID_modified"]>-0.7)
+    photonID_cut = (events["Diphoton_minID_modified"]>-0.7)&(events["Diphoton_minID_modified"]>-0.7)
     events = events[ category_cut & photonID_cut]
     events['mx'] = np.ones(len(events))*int(mx)
     events['my'] = np.ones(len(events))*int(my)
@@ -515,7 +607,7 @@ def get_ddcat4_events_forApply(filename,mx, my):
 def get_bkgcat4_events_forApply(filename,mx, my):
     events = ak.from_parquet(filename)
     category_cut = ((events["category"]==3) | (events["category"]==4))
-    photonID_cut = (events["LeadPhoton_mvaID_modified"]>-0.7) & (events["SubleadPhoton_mvaID_modified"]>-0.7)
+    photonID_cut = (events["Diphoton_minID_modified"]>-0.7) & (events["Diphoton_minID_modified"]>-0.7)
     events = events[ category_cut & photonID_cut]
     events['mx'] = np.ones(len(events))*int(mx)
     events['my'] = np.ones(len(events))*int(my)
@@ -530,7 +622,7 @@ def get_bkgcat4_events_forApply(filename,mx, my):
 def get_data_events_forApply(filename,mx, my):
     events = ak.from_parquet(filename)
     category_cut = ((events["category"]==3) | (events["category"]==4))
-    photonID_cut = (events["LeadPhoton_mvaID_modified"]>-0.7)&(events["SubleadPhoton_mvaID_modified"]>-0.7)
+    photonID_cut = (events["Diphoton_minID_modified"]>-0.7)&(events["Diphoton_minID_modified"]>-0.7)
     events = events[ category_cut & photonID_cut]
     events['mx'] = np.ones(len(events))*int(mx)
     events['my'] = np.ones(len(events))*int(my)
@@ -545,11 +637,9 @@ def get_data_events_forApply(filename,mx, my):
     eventsSL = deal_with_none_object(eventsSL, "SL")
     events = ak.concatenate([eventsFH, eventsSL])
     return events
+input_features = ['Diphoton_pt','Diphoton_eta','Diphoton_phi','Diphoton_dR','LeadPhoton_pt','LeadPhoton_eta','LeadPhoton_phi','SubleadPhoton_pt','SubleadPhoton_eta','SubleadPhoton_phi',"Diphoton_minID_modified","Diphoton_maxID_modified",'jet_1_pt','jet_2_pt','jet_3_pt','jet_4_pt','jet_1_eta','jet_2_eta','jet_3_eta','jet_4_eta','jet_1_phi','jet_2_phi','jet_3_phi','jet_4_phi','jet_1_mass','jet_2_mass','jet_3_mass','jet_4_mass','nGoodAK4jets','nGoodAK8jets','distance_12','distance_13','distance_14','distance_23','distance_24','distance_34','W1_pt','W1_eta','W1_phi','W1_mass','W2_pt','W2_eta','W2_phi','W2_mass','W1_W2_dR','W1_W2_mass','W1_W2_pt','W1_W2_eta','W1_W2_phi','W1_diphoton_dR','W2_diphoton_dR','max_dR_jet_diphoton','jet_1_btagDeepFlavB','jet_2_btagDeepFlavB','jet_3_btagDeepFlavB','jet_4_btagDeepFlavB','sum_two_max_bscores','costhetastar','PuppiMET_pt','PuppiMET_sumEt','nGoodisoleptons','nGoodnonisoleptons', 'nGoodisoelectrons','nGoodnonisoelectrons','nGoodisomuons','nGoodnonisomuons','lepton_pt','lepton_eta','lepton_phi','lepton_iso_MET_mt','lepton_E','lepton_Et','electrons_all_1_pt','electrons_all_2_pt','electrons_all_1_eta','electrons_all_2_eta','electrons_all_1_phi','electrons_all_2_phi','electrons_all_1_mass','electrons_all_2_mass','muons_all_1_pt','muons_all_2_pt','muons_all_1_eta','muons_all_2_eta','muons_all_1_phi','muons_all_2_phi','muons_all_1_mass','muons_all_2_mass','mx','my','leptonpt_METpt']
 
-input_features = ['Diphoton_pt','Diphoton_eta','Diphoton_phi','Diphoton_dR','LeadPhoton_pt','LeadPhoton_eta','LeadPhoton_phi','SubleadPhoton_pt','SubleadPhoton_eta','SubleadPhoton_phi',"Diphoton_minID","Diphoton_maxID",'jet_1_pt','jet_2_pt','jet_3_pt','jet_4_pt','jet_1_eta','jet_2_eta','jet_3_eta','jet_4_eta','jet_1_phi','jet_2_phi','jet_3_phi','jet_4_phi','jet_1_mass','jet_2_mass','jet_3_mass','jet_4_mass','nGoodAK4jets','nGoodAK8jets','distance_12','distance_13','distance_14','distance_23','distance_24','distance_34','W1_pt','W1_eta','W1_phi','W1_mass','W2_pt','W2_eta','W2_phi','W2_mass','W1_W2_dR','W1_W2_mass','W1_W2_pt','W1_W2_eta','W1_W2_phi','W1_diphoton_dR','W2_diphoton_dR','max_dR_jet_diphoton','jet_1_btagDeepFlavB','jet_2_btagDeepFlavB','jet_3_btagDeepFlavB','jet_4_btagDeepFlavB','sum_two_max_bscores','costhetastar','PuppiMET_pt','PuppiMET_sumEt','nGoodisoleptons','nGoodnonisoleptons', 'nGoodisoelectrons','nGoodnonisoelectrons','nGoodisomuons','nGoodnonisomuons','lepton_pt','lepton_eta','lepton_phi','lepton_iso_MET_mt','lepton_E','lepton_Et','electrons_all_1_pt','electrons_all_2_pt','electrons_all_1_eta','electrons_all_2_eta','electrons_all_1_phi','electrons_all_2_phi','electrons_all_1_mass','electrons_all_2_mass','muons_all_1_pt','muons_all_2_pt','muons_all_1_eta','muons_all_2_eta','muons_all_1_phi','muons_all_2_phi','muons_all_1_mass','muons_all_2_mass','mx','my','leptonpt_METpt','costheta1','costheta2']
-
-
-other_vars  = ['category','target', 'train_weight', 'type', 'weight_central','Diphoton_mass']
+other_vars  = ['weight_central','Diphoton_mass','Diphoton_minID_modified','Diphoton_maxID_modified']
 print('start to get input features')
 # get all all_files directory name inside the folder_path
 FHsignal_path_list = []
@@ -595,98 +685,126 @@ events_dd_cat3= get_ddcat3_events_forApply(bkgfiles[2],mx,my)
 events_dd_cat4= get_ddcat4_events_forApply(bkgfiles[3],mx,my)
 event_bkgmc=ak.concatenate([events_pp_cat3,events_pp_cat4,events_dd_cat3,events_dd_cat4])
 
-#load model to get pbdtscore
-model = xgb.XGBClassifier()
-model.load_model(model_path) # v2 is the one with better loss and better plots
+
+model = MultiClassDNN_model(len(input_features), 4)
+state_dict = torch.load(model_path, map_location=torch.device('cpu'))
+new_state_dict = {key.replace("module.", ""): value for key, value in state_dict.items()}
+model.load_state_dict(new_state_dict)
+model.eval()
+with open(scalar_path, 'r') as f:
+    loaded_params = json.load(f)
+    loaded_scaler = StandardScaler()
+    loaded_scaler.mean_ = np.array(loaded_params['mean'])
+    loaded_scaler.scale_ = np.array(loaded_params['scale'])
+    
+print('successfully load the model and scalar')
+def model_predict(event, model, loaded_scaler, input_features):
+    print(len(input_features))
+    print(len(loaded_scaler.mean_))
+    print(len(loaded_scaler.scale_) )
+    df = ak.to_pandas(event[input_features + ['weight_central','Diphoton_mass']])
+    X_test = loaded_scaler.transform(df[input_features])
+    X_test = torch.tensor(X_test).float()
+    proba = model(X_test)
+    proba = proba.detach().numpy()
+    pnn_score = (proba[:,1] + proba[:,2]) / (proba[:,0] + proba[:,1] + proba[:,2])
+    return pnn_score
 print("load model successfully")
 # for sig
 # evaluate the model
-df = ak.to_pandas(events_sig[input_features])
-PBDT_score = model.predict_proba(df[input_features])
-PBDT_score = ( PBDT_score[:,2] + PBDT_score[:,3]) / (PBDT_score[:,0] + PBDT_score[:,1] + PBDT_score[:,2] + PBDT_score[:,3]+ PBDT_score[:,4])
-events_sig['PBDT_score'] = PBDT_score
+PNN_score = model_predict(events_sig, model, loaded_scaler, input_features)
+events_sig['PNN_score'] = PNN_score
 
-# evaluate the model
-# for data
-df = ak.to_pandas(events_data[input_features])
-PBDT_score = model.predict_proba((df[input_features]))
-PBDT_score = ( PBDT_score[:,2] + PBDT_score[:,3]) / (PBDT_score[:,0] + PBDT_score[:,1] + PBDT_score[:,2] + PBDT_score[:,3]+ PBDT_score[:,4])
-events_data['PBDT_score'] = PBDT_score
+PNN_score = model_predict(events_data, model, loaded_scaler, input_features)
+events_data['PNN_score'] = PNN_score
 
-df = ak.to_pandas(event_bkgmc[input_features])
-PBDT_score = model.predict_proba((df[input_features]))
-PBDT_score = ( PBDT_score[:,2] + PBDT_score[:,3]) / (PBDT_score[:,0] + PBDT_score[:,1] + PBDT_score[:,2] + PBDT_score[:,3]+ PBDT_score[:,4])
-event_bkgmc['PBDT_score'] = PBDT_score
+PNN_score = model_predict(event_bkgmc, model, loaded_scaler, input_features)
+event_bkgmc['PNN_score'] = PNN_score
 
-df = ak.to_pandas(events_bbgg[input_features])
-PBDT_score = model.predict_proba((df[input_features]))
-PBDT_score = ( PBDT_score[:,2] + PBDT_score[:,3]) / (PBDT_score[:,0] + PBDT_score[:,1] + PBDT_score[:,2] + PBDT_score[:,3]+ PBDT_score[:,4])
-events_bbgg['PBDT_score'] = PBDT_score
+PNN_score = model_predict(events_bbgg, model, loaded_scaler, input_features)
+events_bbgg['PNN_score'] = PNN_score
 
-df = ak.to_pandas(events_zzgg[input_features])
-PBDT_score = model.predict_proba((df[input_features]))
-PBDT_score = ( PBDT_score[:,2] + PBDT_score[:,3]) / (PBDT_score[:,0] + PBDT_score[:,1] + PBDT_score[:,2] + PBDT_score[:,3]+ PBDT_score[:,4])
-events_zzgg['PBDT_score'] = PBDT_score
+PNN_score = model_predict(events_zzgg, model, loaded_scaler, input_features)
+events_zzgg['PNN_score'] = PNN_score
 print('get all the PBDT score for merged nominal.parquet')
-# using bkgmc and sigmc signal region
-def calculate_significance(events_sig, events_bkg, threshold0, threshold1,events_data):
-    cut1 = 1 - threshold0 #if threshold0=0, cut1=1
-    cut0 = 1 - threshold0 - threshold1
-    # 计算信号和背景的PNN score
-    mass_cut=np.logical_and(events_sig['Diphoton_mass'] > 115, events_sig['Diphoton_mass'] < 135)
-    events_sig = events_sig[mass_cut]
-    mass_cut=np.logical_and(events_bkg['Diphoton_mass'] > 115, events_bkg['Diphoton_mass'] < 135)
-    events_bkg = events_bkg[mass_cut]
-    mass_cut=np.logical_and(events_data['Diphoton_mass'] > 115, events_data['Diphoton_mass'] < 135)
-    events_data = events_data[mass_cut]
-    df_sig = pd.DataFrame()
-    df_sig['sig_PBDT_score'] = np.array(events_sig['PBDT_score'])
-    df_sig['sig_weight'] = np.array(events_sig['weight_central'])
-    df_bkg = pd.DataFrame()
-    df_bkg['bkg_PBDT_score'] = np.array(events_bkg['PBDT_score'])
-    df_bkg['bkg_weight'] = np.array(events_bkg['weight_central'])
-    df_data = pd.DataFrame()
-    df_data['data_PBDT_score'] = np.array(events_data['PBDT_score'])
-    df_data['data_weight'] = np.array(events_data['weight_central'])
-    # 计算信号和背景的PNN score的cut
-    signal_PBDT_score_cut = (df_sig['sig_PBDT_score'] > cut0) & (df_sig['sig_PBDT_score'] <= cut1)
-    background_PBDT_score_cut = (df_bkg['bkg_PBDT_score'] > cut0) & (df_bkg['bkg_PBDT_score'] <= cut1)
-    data_PBDT_score_cut = (df_data['data_PBDT_score'] > cut0) & (df_data['data_PBDT_score'] <= cut1)
-    # 计算信号和背景的PNN score的cut后的weight
-    signal_weight = df_sig['sig_weight'][signal_PBDT_score_cut]
-    background_weight = df_bkg['bkg_weight'][background_PBDT_score_cut]
-    data_weight = df_data['data_weight'][data_PBDT_score_cut]
-    if (len(signal_weight) == 0) or (len(background_weight) == 0):
-        return 0
-    # if sum of bkg weight < 5, return 0
-    if np.sum(data_weight) < 5:
-        return 0
-    # significance
-    significance = np.sum(signal_weight) / np.sqrt(np.sum(background_weight))
-    # print('significance:',significance)
-    return significance
-# 定义目标函数
-def objective(thresholds):
-    threshold1, threshold2 = thresholds
-    significance1 = calculate_significance(events_sig, event_bkgmc, 0, threshold1, events_data)
-    significance2 = calculate_significance(events_sig, event_bkgmc, threshold1, threshold2, events_data)
-    return -(np.sqrt(significance1) + np.sqrt(significance2))
+
+
+events_sig_test=events_sig[['Diphoton_mass','weight_central','category','PNN_score']]
+events_bkgmc_test=event_bkgmc[['Diphoton_mass','weight_central','category','PNN_score']]
+events_data_test=events_data[['Diphoton_mass','weight_central','category','PNN_score']]
+ak.to_parquet(events_sig_test,"./"+signal_samples['sig_output_name'][0]+"_PNN.parquet")
+ak.to_parquet(events_bkgmc_test,"./bkgmc_PNN.parquet")
+ak.to_parquet(events_data_test,"./data_PNN.parquet")
+# plot the PNN score
+import mplhep as hep
+import matplotlib.pyplot as plt
+plt.figure(figsize=(8, 6))
+hep.style.use("CMS")
+plt.hist(events_sig['PNN_score'],weights = 30*events_sig.weight_central ,range=(0,1),bins=100, histtype='step', label='30*signal',color='#FF0000')
+plt.hist(event_bkgmc['PNN_score'],weights = event_bkgmc.weight_central ,range=(0,1),bins=100, histtype='stepfilled', label='pp+dd',color='#00BFFF')
+hist, bins = np.histogram(events_data[(events_data.Diphoton_mass>135)|(events_data.Diphoton_mass<115)]['PNN_score'],bins=100)
+non_zero_bins = hist > 0
+bin_centers = 0.5 * (bins[:-1] + bins[1:])
+plt.scatter(bin_centers[non_zero_bins], hist[non_zero_bins], marker='o', color='black', label='data')
+plt.xlabel('PNN Score')
+plt.ylabel('Events')
+plt.yscale('log')
+#y axis unit small
+plt.legend()
+plt.savefig("/afs/cern.ch/user/s/shsong/WWggDNN/bdt/dnnscore.png", dpi=140)
 print('start to get the best threshold by using bayesian optimization')
 # 贝叶斯优化
-result = gp_minimize(objective, [(0.001, 0.6), (0.2, 0.4)], n_calls=300, random_state=123)
-
 # 输出最佳的PNN score阈值
-best_threshold1, best_threshold2 = result.x
-# add max_PBDT_score to the dataframe with index
-# max_PBDT_score = 0
-cut1=1-best_threshold1
-cut2=1-best_threshold2-best_threshold1
+
+pbounds = {
+        'bo1': (0.0000001, 0.2), 
+        'bo2': (0.0000001, 0.8), 
+        }
+debug=False
+optimizer = BayesianOptimization(
+    f=target_function,
+    pbounds=pbounds,
+    random_state=1,
+    verbose=4
+)
+utility = UtilityFunction(kind="ei", kappa=2.576, xi=0.0)
+next_point=optimizer.suggest(utility)
+target=target_function(next_point['bo1'],next_point['bo2'],events_sig,events_data,event_bkgmc)
+print("looping BayesianOptimization")
+for _ in range(300):
+    next_point = optimizer.suggest(utility)
+    target = target_function(next_point['bo1'],next_point['bo2'],events_sig,events_data,event_bkgmc)
+    optimizer.register(params=next_point, target=target)
+boundaries=optimizer.max['params']
+cut1=1-boundaries['bo1']
+cut2=1-boundaries['bo1']-boundaries['bo2']
 boundary1.append(cut1)
 boundary2.append(cut2)
+print("best significance",optimizer.max['target'])
 print('high purity cut:',cut1)
 print('low purity cut:',cut2)
-print('best significance',-result.fun)
-#save systematics branches to root file
+print('highpurity sig eff:',ak.sum(events_sig['weight_central'][(events_sig['PNN_score'] > cut1) & (events_sig['PNN_score'] <= 1)])/ak.sum(events_sig['weight_central']))
+print('lowpurity sig eff:',ak.sum(events_sig['weight_central'][(events_sig['PNN_score'] > cut2) & (events_sig['PNN_score'] <= cut1)])/ak.sum(events_sig['weight_central']))
+print("highpurity datasideband num:",len(events_data[((events_data.Diphoton_mass>135)|(events_data.Diphoton_mass<115))&((events_data.PNN_score > cut1) & (events_data.PNN_score <= 1))]))
+print("lowpurity datasideband num:",len(events_data[((events_data.Diphoton_mass>135)|(events_data.Diphoton_mass<115))&((events_data.PNN_score > cut2) & (events_data.PNN_score <= cut1))]))
+massname="MX"+(signal_samples['sig_output_name'][0].split("MX"))[1].split("_cat12")[0]
+sigcatAname="combineFHSL_cat12test"
+events_sig['CMS_hgg_mass']=events_sig['Diphoton_mass']
+events_sig["dZ"]=np.ones(len(events_sig['CMS_hgg_mass']))
+events_sig["weight"]=events_sig["weight_central"]
+events_sig_test=events_sig[['dZ','PNN_score','category','CMS_hgg_mass','weight']]
+events_sig_test = events_sig[(events_sig['PNN_score'] > 0) & (events_sig['PNN_score'] <= 1)]
+ak.to_parquet(events_sig_test,"./"+signal_samples['sig_output_name'][0]+"_test.parquet")
+events_data["CMS_hgg_mass"]=events_data["Diphoton_mass"]
+events_data['weight']=events_data.weight_central
+events_data_test=events_data[['CMS_hgg_mass','weight','PNN_score']]
+events_data_test = events_data[(events_data['PNN_score'] > cut1) & (events_data['PNN_score'] <= 1)]
+dataA_rootname="Data_2017_"+sigcatAname+"_"+massname+".root"
+data_Acat_output_path="./"+dataA_rootname.replace(".root",".parquet")
+ak.to_parquet(events_data_test, data_Acat_output_path)
+
+# #add PNSF to merged nominal.parquet
+
 def add_sf_branches(events):
     events["CMS_hgg_mass"]=events["Diphoton_mass"]
     events["weight"]=events["weight_central"]
@@ -861,7 +979,7 @@ def process_sig_samples(FHfile,SLfile,bbggfile,zzggfile,sigoutput,bbggoutput,zzg
         pho_eta=ak.concatenate([ak.unflatten(events.LeadPhoton_eta,counts=1),ak.unflatten(events.SubleadPhoton_eta,counts=1)],axis=1)
         pho_phi=ak.concatenate([ak.unflatten(events.LeadPhoton_phi,counts=1),ak.unflatten(events.SubleadPhoton_phi,counts=1)],axis=1)
         pho_mass=ak.concatenate([ak.unflatten(events.LeadPhoton_mass,counts=1),ak.unflatten(events.SubleadPhoton_mass,counts=1)],axis=1)
-        photonID=ak.concatenate([ak.unflatten(events.LeadPhoton_mvaID_modified,counts=1),ak.unflatten(events.SubleadPhoton_mvaID_modified,counts=1)],axis=1)
+        photonID=ak.concatenate([ak.unflatten(events.Diphoton_minID_modified,counts=1),ak.unflatten(events.Diphoton_minID_modified,counts=1)],axis=1)
         #sort photonID by max to min
         photonID_sorted = photonID[ak.argsort(photonID,axis=1,ascending=False)]
         events["Diphoton_minID_modified"] = photonID_sorted[:,1]
@@ -1185,7 +1303,7 @@ def process_sig_samples(FHfile,SLfile,bbggfile,zzggfile,sigoutput,bbggoutput,zzg
     def get_sig_events_forApply(filename,mx,my):
         events = ak.from_parquet(filename)
         category_cut = ((events["category"]==3) | (events["category"]==4))
-        photonID_cut = (events["LeadPhoton_mvaID_modified"]>-0.7)&(events["SubleadPhoton_mvaID_modified"]>-0.7)
+        photonID_cut = (events["Diphoton_minID_modified"]>-0.7)&(events["Diphoton_minID_modified"]>-0.7)
         events = events[ category_cut & photonID_cut]
         events['mx'] = np.ones(len(events))*int(mx)
         events['my'] = np.ones(len(events))*int(my)

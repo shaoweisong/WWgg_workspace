@@ -9,6 +9,7 @@ condor_logs/
 *.stdout
 *.log
 *.root
+*.parquet
 *.0
 __init__.py
 docker_stderror

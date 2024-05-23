@@ -1,0 +1,16 @@
+{
+    "3000": {
+        "cut1": 0.9362115445852266,
+        "cut2": 0.3865903168461168,
+        "FHSL_highpurity": 0.009608447268846746,
+        "FHSL_lowpurity": 0.00024449187204821776,
+        "BBGG_highpurity": 0.006971425087065478,
+        "BBGG_lowpurity": 0.0006447672725675969,
+        "ZZGG_highpurity": 0.001020170942337062,
+        "ZZGG_lowpurity": 3.55632843558208e-05,
+        "highpurity_sigeff": 0.966483269104208,
+        "lowpurity_sigeff": 0.024592662805436913,
+        "highpurity_sidebandnum": 6,
+        "lowpurity_sidebandnum": 13
+    }
+}
