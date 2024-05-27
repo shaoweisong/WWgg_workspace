@@ -2,10 +2,20 @@
 import awkward as ak
 import sys
 debug=False
-local=False
+local=True
+if local:
+    sys.path.append("/eos/user/s/shsong/pkgs_condor/parquet_to_root-0.3.0")
+    sys.path.append("/eos/user/s/shsong/pkgs_condor/bayesian-optimization-1.4.3")
+else:
+    sys.path.append("./PBDT_HH_FHSL_combine_2017/pkgs_condor/parquet_to_root-0.3.0")
+    sys.path.append("./PBDT_HH_FHSL_combine_2017/pkgs_condor/bayesian-optimization-1.4.3")
+if debug:
+    print(sys.path)
 import numpy as np
 import os
 import vector
+from bayes_opt import BayesianOptimization
+from bayes_opt.util import UtilityFunction
 vector.register_awkward()
 import mplhep as hep
 hep.style.use(hep.style.CMS)
@@ -14,6 +24,7 @@ import pandas as pd
 import glob
 from scipy.optimize import minimize
 import argparse
+from parquet_to_root import parquet_to_root
 import random
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -25,33 +36,20 @@ from sklearn.preprocessing import StandardScaler
 # 自定义函数，将参数字符串转换为列表
 def str_to_list(arg):
     return ast.literal_eval(arg)
+
 parser = argparse.ArgumentParser(description='Process some integers.')
 parser.add_argument('--is_HH', type=str, default="False", help='is HH')
 parser.add_argument('--inputFHFiles',type=str_to_list, help='inputFHFiles List')
 parser.add_argument('--inputBKGFiles',type=str_to_list, help='input pp and dd Files List')
-parser.add_argument('--data',type=str,default="/eos/user/s/shsong/HiggsDNA/UL18data/merged_nominal.parquet", help='data file')
+parser.add_argument('--data',type=str,default="/eos/user/s/shsong/HiggsDNA/UL17data/merged_nominal.parquet", help='data file')
 parser.add_argument('--model',type=str,default="/eos/user/z/zhenxuan/PNN_wwgg/PNN_YH_combined/boosted_FHSL/data/simple_DNN_real_epoch_30_mx500_3000_random_mass_reweightforsignal_lesslayers_bkgcp2times/model.pth", help='model file') #old model for 3TeV 220fb limit
 # parser.add_argument('--model',type=str,default="/eos/user/z/zhenxuan/PNN_wwgg/PNN_YH_combined/boosted_FHSL/data/simple_DNN_real_epoch_200_mx500_3000_random_mass_reweightforsignal_lesslayers_bkgcp2times_fixedsoftmax_fixedreweight_reweightsignalwithhighmasshighweight_nobbgg_adddiphotonptreweight_largebatchsize_addweight_decay_addbatchnorm_highlr/model.pth", help='model file') old model with not good performance
 # parser.add_argument('--model',type=str,default="/eos/user/z/zhenxuan/PNN_wwgg/PNN_YH_combined/boosted_FHSL/data/simple_DNN_train_boosted_1/model.pth", help='model file') new model zhenxuan change weight 3TeV 175 
 parser.add_argument('--scalar',type=str,default="/eos/user/z/zhenxuan/PNN_wwgg/PNN_YH_combined/boosted_FHSL/data/simple_DNN_real_epoch_30_mx500_3000_random_mass_reweightforsignal_lesslayers_bkgcp2times/scaler_params.json", help='scalar file')
-parser.add_argument('--year',type=str,default="2017", help='year')
 args = parser.parse_args()
-datapath = args.data
+UL2017data = args.data
 model_path = args.model
 scalar_path = args.scalar
-year = args.year
-print(year)
-if local:
-    sys.path.append("/eos/user/s/shsong/pkgs_condor/parquet_to_root-0.3.0")
-    sys.path.append("/eos/user/s/shsong/pkgs_condor/bayesian-optimization-1.4.3")
-else:
-    sys.path.append("./PBDT_HH_FHSL_combine_"+year+"/pkgs_condor/parquet_to_root-0.3.0")
-    sys.path.append("./PBDT_HH_FHSL_combine_"+year+"/pkgs_condor/bayesian-optimization-1.4.3")
-if debug:
-    print(sys.path)
-from parquet_to_root import parquet_to_root
-from bayes_opt import BayesianOptimization
-from bayes_opt.util import UtilityFunction
 # class MultiClassDNN_model(nn.Module): new model zhenxuan change weight 3TeV 175 
 #     def __init__(self, input_size, output_size):
 #         super(MultiClassDNN_model, self).__init__()
@@ -112,12 +110,12 @@ class MultiClassDNN_model(nn.Module):
 #         )
 #         self.fc4 = nn.Linear(64, output_size)
 
-    # def forward(self, x):
-    #     out = self.fc1(x)
-    #     out = self.fc2(out)
-    #     out = self.fc3(out)
-    #     out = self.fc4(out)
-    #     return out
+    def forward(self, x):
+        out = self.fc1(x)
+        out = self.fc2(out)
+        out = self.fc3(out)
+        out = self.fc4(out)
+        return out
 
 def get_fwhm(hist_sig, bin_sig):
     peak_index = np.argmax(hist_sig)
@@ -323,7 +321,7 @@ def get_data_events_forApply(filename,mx, my):
     # specify mx and my for each data for each signal mass point
     events['mx'] = np.ones(len(events))*int(mx)
     events['my'] = np.ones(len(events))*int(my)
-    events['year'] = np.ones(len(events))*int(year)
+    events['year'] = np.ones(len(events))*2017
     events = get_jet_variables(events)
     events = get_leptons_variables(events)
     events = get_met_variables(events)
@@ -378,7 +376,7 @@ events_sigSL = get_sig_events_forApply(signal_samples['SLpath'][0],mx,my)
 events_bbgg = get_sig_events_forApply(signal_samples['BBGGpath'][0],mx,my)
 events_zzgg = get_sig_events_forApply(signal_samples['ZZggpath'][0],mx,my)
 events_sig = ak.concatenate([events_sigFH,events_sigSL])
-events_data = get_data_events_forApply(datapath,mx,my)
+events_data = get_data_events_forApply(UL2017data,mx,my)
 events_pp_cat1= get_data_events_forApply(bkgfiles[0],mx,my)
 events_pp_cat2= get_data_events_forApply(bkgfiles[1],mx,my)
 events_dd_cat1= get_dd_events_forApply(bkgfiles[2],mx,my)
@@ -388,8 +386,7 @@ import json
 #load model to get dnnscore
 print('load the model')
 
-# model = MultiClassDNN_model(len(input_features), 5) new model zhenxuan change weight 3TeV 175
-model = MultiClassDNN_model(len(input_features), 4) #old model 3TeV 220
+model = MultiClassDNN_model(len(input_features), 5)
 state_dict = torch.load(model_path, map_location=torch.device('cpu'))
 new_state_dict = {key.replace("module.", ""): value for key, value in state_dict.items()}
 model.load_state_dict(new_state_dict)
@@ -405,10 +402,10 @@ def model_predict(event, model, loaded_scaler, input_features):
     X_test = loaded_scaler.transform(df[input_features])
     X_test = torch.tensor(X_test).float()
     proba = model(X_test)
-    # proba = F.softmax(proba, dim=1) only for new models
+    proba = F.softmax(proba, dim=1)
     proba = proba.detach().numpy()
-    pnn_score = (proba[:,1] + proba[:,2] + proba[:,3]) / (proba[:,0] + proba[:,1] + proba[:,2] + proba[:,3])# old model 3TeV 220
-    # pnn_score = (proba[:,4] + proba[:,2] + proba[:,3]) / (proba[:,0] + proba[:,1] + proba[:,2] + proba[:,3] + proba[:,4]) new model zhenxuan change weight 3TeV 175
+    # pnn_score = (proba[:,1] + proba[:,2] + proba[:,3]) / (proba[:,0] + proba[:,1] + proba[:,2] + proba[:,3]) old model 3TeV 220
+    pnn_score = (proba[:,4] + proba[:,2] + proba[:,3]) / (proba[:,0] + proba[:,1] + proba[:,2] + proba[:,3] + proba[:,4])
     return pnn_score
 # for sig, data, bkgmc, bbgg and zzgg
 # evaluate the model
@@ -459,8 +456,8 @@ print('start to get the best threshold by using bayesian optimization')
 #         } old model 3TeV 220
 
 pbounds = {
-        'bo1': (0.0001, 0.1), 
-        'bo2': (0.0001, 0.7), 
+        'bo1': (0.01, 0.2), 
+        'bo2': (0.01, 0.6), 
         }
 debug=False
 optimizer = BayesianOptimization(
@@ -493,8 +490,8 @@ print('high purity signal efficiency:',highpurity_sigeff)
 print('low purity signal efficiency:',lowpurity_sigeff)
 print('high purity sideband number:',highpurity_sidebandnum)
 print('low purity sideband number:',lowpurity_sidebandnum)
-ak.to_parquet(events_data, './Data_'+year+'_combineFHSL_cat12test_MX3000_MH125.parquet')
-ak.to_parquet(events_sig, './Signal_'+year+'_combineFHSL_cat12test_MX3000_MH125.parquet')
+ak.to_parquet(events_data, './Data_2017_combineFHSL_cat12test_MX3000_MH125.parquet')
+ak.to_parquet(events_sig, './Signal_2017_combineFHSL_cat12test_MX3000_MH125.parquet')
 # #add PNSF to merged nominal.parquet
 def add_HtaggerSF(event,mass):
     mass_list=[500,550,600,650,700,750,800,850,900,1000,1100,1200,1300,1400,1500,1600,1700,1800,1900,2000,2200,2400,2600,2800,3000]
@@ -558,16 +555,16 @@ events_bbgg = add_sf_branches(events_bbgg)
 events_zzgg = add_sf_branches(events_zzgg)
 events_sig_highpurity = events_sig[(events_sig['PNN_score'] > cut1) & (events_sig['PNN_score'] <= 1)]
 events_sig_lowpurity = events_sig[(events_sig['PNN_score'] > cut2) & (events_sig['PNN_score'] <= cut1)]
-ak.to_parquet(events_sig_highpurity,"./PBDT_HH_FHSL_combine_"+year+"/"+signal_samples['sig_output_name'][0]+"_highpurity.parquet")
-ak.to_parquet(events_sig_lowpurity,"./PBDT_HH_FHSL_combine_"+year+"/"+signal_samples['sig_output_name'][0]+"_lowpurity.parquet")
+ak.to_parquet(events_sig_highpurity,"./PBDT_HH_FHSL_combine_2017/"+signal_samples['sig_output_name'][0]+"_highpurity.parquet")
+ak.to_parquet(events_sig_lowpurity,"./PBDT_HH_FHSL_combine_2017/"+signal_samples['sig_output_name'][0]+"_lowpurity.parquet")
 events_bbgg_highpurity = events_bbgg[(events_bbgg['PNN_score'] > cut1) & (events_bbgg['PNN_score'] <= 1)]
 events_bbgg_lowpurity = events_bbgg[(events_bbgg['PNN_score'] > cut2) & (events_bbgg['PNN_score'] <= cut1)]
-ak.to_parquet(events_bbgg_highpurity,"./PBDT_HH_FHSL_combine_"+year+"/"+signal_samples['bbgg_output_name'][0]+"_highpurity.parquet")
-ak.to_parquet(events_bbgg_lowpurity,"./PBDT_HH_FHSL_combine_"+year+"/"+signal_samples['bbgg_output_name'][0]+"_lowpurity.parquet")
+ak.to_parquet(events_bbgg_highpurity,"./PBDT_HH_FHSL_combine_2017/"+signal_samples['bbgg_output_name'][0]+"_highpurity.parquet")
+ak.to_parquet(events_bbgg_lowpurity,"./PBDT_HH_FHSL_combine_2017/"+signal_samples['bbgg_output_name'][0]+"_lowpurity.parquet")
 events_zzgg_highpurity = events_zzgg[(events_zzgg['PNN_score'] > cut1) & (events_zzgg['PNN_score'] <= 1)]
 events_zzgg_lowpurity = events_zzgg[(events_zzgg['PNN_score'] > cut2) & (events_zzgg['PNN_score'] <= cut1)]
-ak.to_parquet(events_zzgg_highpurity,"./PBDT_HH_FHSL_combine_"+year+"/"+signal_samples['zzgg_output_name'][0]+"_highpurity.parquet")
-ak.to_parquet(events_zzgg_lowpurity,"./PBDT_HH_FHSL_combine_"+year+"/"+signal_samples['zzgg_output_name'][0]+"_lowpurity.parquet")
+ak.to_parquet(events_zzgg_highpurity,"./PBDT_HH_FHSL_combine_2017/"+signal_samples['zzgg_output_name'][0]+"_highpurity.parquet")
+ak.to_parquet(events_zzgg_lowpurity,"./PBDT_HH_FHSL_combine_2017/"+signal_samples['zzgg_output_name'][0]+"_lowpurity.parquet")
 #get data once only for the nominal parquet
 events_data["CMS_hgg_mass"]=events_data["Diphoton_mass"]
 events_data['weight']=events_data.weight_central
@@ -578,21 +575,21 @@ massname="MX"+(signal_samples['sig_output_name'][0].split("MX"))[1].split("_cat1
 sigcatAname="combineFHSL_cat12highpurity"
 bbggcatAname="bbgg_cat12highpurity"
 zzggcatAname="zzgg_cat12highpurity"
-sigA_rootname="CombineFHSL_"+massname+"_"+year+"_"+sigcatAname+".root"
-bbggA_rootname="CombineFHSL_"+massname+"_"+year+"_"+bbggcatAname+".root"
-zzggA_rootname="CombineFHSL_"+massname+"_"+year+"_"+zzggcatAname+".root"
-dataA_rootname="Data_"+year+"_"+sigcatAname+"_"+massname+".root"
+sigA_rootname="CombineFHSL_"+massname+"_2017_"+sigcatAname+".root"
+bbggA_rootname="CombineFHSL_"+massname+"_2017_"+bbggcatAname+".root"
+zzggA_rootname="CombineFHSL_"+massname+"_2017_"+zzggcatAname+".root"
+dataA_rootname="Data_2017_"+sigcatAname+"_"+massname+".root"
 dataA_treename="Data_13TeV_"+sigcatAname
 sigA_treename="gghh_125_13TeV_"+sigcatAname
 bbggA_treename="gghh_125_13TeV_"+bbggcatAname
 zzggA_treename="gghh_125_13TeV_"+zzggcatAname
 sigcatBname="combineFHSL_cat12lowpurity"
-sigB_rootname="CombineFHSL_"+massname+"_"+year+"_"+sigcatBname+".root"
+sigB_rootname="CombineFHSL_"+massname+"_2017_"+sigcatBname+".root"
 sigB_treename="gghh_125_13TeV_"+sigcatBname
-dataB_rootname="Data_"+year+"_"+sigcatBname+"_"+massname+".root"
+dataB_rootname="Data_2017_"+sigcatBname+"_"+massname+".root"
 dataB_treename="Data_13TeV_"+sigcatBname
-data_Acat_output_path="./PBDT_HH_FHSL_combine_"+year+"/"+dataA_rootname.replace(".root",".parquet")
-data_Bcat_output_path="./PBDT_HH_FHSL_combine_"+year+"/"+dataB_rootname.replace(".root",".parquet")
+data_Acat_output_path="./PBDT_HH_FHSL_combine_2017/"+dataA_rootname.replace(".root",".parquet")
+data_Bcat_output_path="./PBDT_HH_FHSL_combine_2017/"+dataB_rootname.replace(".root",".parquet")
 ak.to_parquet(events_data_highpurity, data_Acat_output_path)
 ak.to_parquet(events_data_lowpurity, data_Bcat_output_path)
 bbgg_highpurity=ak.sum(events_bbgg_highpurity['weight'])
@@ -713,10 +710,10 @@ def process_sig_samples(FHfile,SLfile,bbggfile,zzggfile,sigoutput,bbggoutput,zzg
         X_test = loaded_scaler.transform(df[input_features])
         X_test = torch.tensor(X_test).float()
         proba = model(X_test)
-        # proba = F.softmax(proba, dim=1) only for new models
+        proba = F.softmax(proba, dim=1)
         proba = proba.detach().numpy()
-        pnn_score = (proba[:,1] + proba[:,2] + proba[:,3]) / (proba[:,0] + proba[:,1] + proba[:,2] + proba[:,3]) #old model 3TeV 220
-        # pnn_score = (proba[:,4] + proba[:,2] + proba[:,3]) / (proba[:,0] + proba[:,1] + proba[:,2] + proba[:,3] + proba[:,4]) new model zhenxuan changed weight 3TeV 170
+        # # pnn_score = (proba[:,1] + proba[:,2] + proba[:,3]) / (proba[:,0] + proba[:,1] + proba[:,2] + proba[:,3]) old model 3TeV 220
+        pnn_score = (proba[:,4] + proba[:,2] + proba[:,3]) / (proba[:,0] + proba[:,1] + proba[:,2] + proba[:,3] + proba[:,4])
         event['PNN_score'] = pnn_score
         return event
     def add_shape_uncertainty_br(events):
@@ -742,16 +739,16 @@ def process_sig_samples(FHfile,SLfile,bbggfile,zzggfile,sigoutput,bbggoutput,zzg
     events_zzgg=add_shape_uncertainty_br(events_zzgg)
     events_sig_highpurity = events_sig[(events_sig['PNN_score'] > cut1) & (events_sig['PNN_score'] <= 1)]
     events_sig_lowpurity = events_sig[(events_sig['PNN_score'] > cut2) & (events_sig['PNN_score'] <= cut1)]
-    ak.to_parquet(events_sig_highpurity, "./PBDT_HH_FHSL_combine_"+year+"/" + sigoutput + "_highpurity.parquet")
-    ak.to_parquet(events_sig_lowpurity, "./PBDT_HH_FHSL_combine_"+year+"/" + sigoutput + "_lowpurity.parquet")
+    ak.to_parquet(events_sig_highpurity, "./PBDT_HH_FHSL_combine_2017/" + sigoutput + "_highpurity.parquet")
+    ak.to_parquet(events_sig_lowpurity, "./PBDT_HH_FHSL_combine_2017/" + sigoutput + "_lowpurity.parquet")
     events_bbgg_highpurity = events_bbgg[(events_bbgg['PNN_score'] > cut1) & (events_bbgg['PNN_score'] <= 1)]
     events_bbgg_lowpurity = events_bbgg[(events_bbgg['PNN_score'] > cut2) & (events_bbgg['PNN_score'] <= cut1)]
-    ak.to_parquet(events_bbgg_highpurity, "./PBDT_HH_FHSL_combine_"+year+"/" + bbggoutput + "_highpurity.parquet")
-    ak.to_parquet(events_bbgg_lowpurity, "./PBDT_HH_FHSL_combine_"+year+"/" + bbggoutput + "_lowpurity.parquet")
+    ak.to_parquet(events_bbgg_highpurity, "./PBDT_HH_FHSL_combine_2017/" + bbggoutput + "_highpurity.parquet")
+    ak.to_parquet(events_bbgg_lowpurity, "./PBDT_HH_FHSL_combine_2017/" + bbggoutput + "_lowpurity.parquet")
     events_zzgg_highpurity = events_zzgg[(events_zzgg['PNN_score'] > cut1) & (events_zzgg['PNN_score'] <= 1)]
     events_zzgg_lowpurity = events_zzgg[(events_zzgg['PNN_score'] > cut2) & (events_zzgg['PNN_score'] <= cut1)]
-    ak.to_parquet(events_zzgg_highpurity, "./PBDT_HH_FHSL_combine_"+year+"/" + zzggoutput + "_highpurity.parquet")
-    ak.to_parquet(events_zzgg_lowpurity, "./PBDT_HH_FHSL_combine_"+year+"/" + zzggoutput + "_lowpurity.parquet")
+    ak.to_parquet(events_zzgg_highpurity, "./PBDT_HH_FHSL_combine_2017/" + zzggoutput + "_highpurity.parquet")
+    ak.to_parquet(events_zzgg_lowpurity, "./PBDT_HH_FHSL_combine_2017/" + zzggoutput + "_lowpurity.parquet")
     highpuritylen=len(events_sig_highpurity)
 
     return highpuritylen
@@ -772,10 +769,10 @@ def process_highpurity_sigfile(file):
         tree_name = "gghh_125_13TeV_" + signaltype + "_cat12highpurity_" + sys + "Up01sigma"
     elif "nominal" in file.split("/")[-1]:
         tree_name = "gghh_125_13TeV_" + signaltype + "_cat12highpurity"
-    rootname="./PBDT_HH_FHSL_combine_"+year+"/flashgginput/"+file.split("/")[-1].replace("parquet", "root")
+    rootname="./PBDT_HH_FHSL_combine_2017/flashgginput/"+file.split("/")[-1].replace("parquet", "root")
     parquet_to_root(
         file,
-        "./PBDT_HH_FHSL_combine_"+year+"/flashgginput/"
+        "./PBDT_HH_FHSL_combine_2017/flashgginput/"
         + file.split("/")[-1].replace("parquet", "root"),
         treename=tree_name,
     )
@@ -798,7 +795,7 @@ def process_highpurity_zzggfile(file):
         tree_name = "gghh_125_13TeV_" + signaltype + "_cat12highpurity"
     parquet_to_root(
         file,
-        "./PBDT_HH_FHSL_combine_"+year+"/flashgginput/"
+        "./PBDT_HH_FHSL_combine_2017/flashgginput/"
         + file.split("/")[-1].replace("parquet", "root"),
         treename=tree_name,
     )
@@ -821,7 +818,7 @@ def process_highpurity_bbggfile(file):
         tree_name = "gghh_125_13TeV_" + signaltype + "_cat12highpurity"
     parquet_to_root(
         file,
-        "./PBDT_HH_FHSL_combine_"+year+"/flashgginput/"
+        "./PBDT_HH_FHSL_combine_2017/flashgginput/"
         + file.split("/")[-1].replace("parquet", "root"),
         treename=tree_name,
     )
@@ -845,7 +842,7 @@ def process_lowpurity_sigfile(file):
         tree_name = "gghh_125_13TeV_" + signaltype + "_cat12lowpurity"
     parquet_to_root(
         file,
-        "./PBDT_HH_FHSL_combine_"+year+"/flashgginput/"
+        "./PBDT_HH_FHSL_combine_2017/flashgginput/"
         + file.split("/")[-1].replace("parquet", "root"),
         treename=tree_name,
     )
@@ -868,7 +865,7 @@ def process_lowpurity_zzggfile(file):
         tree_name = "gghh_125_13TeV_" + signaltype + "_cat12lowpurity"
     parquet_to_root(
         file,
-        "./PBDT_HH_FHSL_combine_"+year+"/flashgginput/"
+        "./PBDT_HH_FHSL_combine_2017/flashgginput/"
         + file.split("/")[-1].replace("parquet", "root"),
         treename=tree_name,
     )
@@ -890,7 +887,7 @@ def process_lowpurity_bbggfile(file):
         tree_name = "gghh_125_13TeV_" + signaltype + "_cat12lowpurity"
     parquet_to_root(
         file,
-        "./PBDT_HH_FHSL_combine_"+year+"/flashgginput/"
+        "./PBDT_HH_FHSL_combine_2017/flashgginput/"
         + file.split("/")[-1].replace("parquet", "root"),
         treename=tree_name,
     )
@@ -901,7 +898,7 @@ import multiprocessing
 if __name__ == "__main__":
     print("starting to get root")
     Xmass=FHfile.split("M-")[1].split("_")[0]
-    directory_path = "./PBDT_HH_FHSL_combine_"+year+"/flashgginput/MX"+Xmass+"_MH125"
+    directory_path = "./PBDT_HH_FHSL_combine_2017/flashgginput/MX"+Xmass+"_MH125"
     if os.path.exists(directory_path):
         rmcommand="rm -rf "+directory_path
         os.system(rmcommand)
@@ -909,12 +906,12 @@ if __name__ == "__main__":
         os.mkdir(directory_path)
     else:
         os.mkdir(directory_path)
-    highpurity_sigfiles = glob.glob("./PBDT_HH_FHSL_combine_"+year+"/CombineFHSL_MX"+Xmass+"_MH125_cat12_m*_highpurity.parquet")
-    lowpurity_sigfiles = glob.glob("./PBDT_HH_FHSL_combine_"+year+"/CombineFHSL_MX"+Xmass+"_MH125_cat12_m*_lowpurity.parquet")
-    lowpurity_bbggfiles = glob.glob("./PBDT_HH_FHSL_combine_"+year+"/BBGG_MX"+Xmass+"_MH125_cat12_m*_lowpurity.parquet")
-    highpurity_bbggfiles = glob.glob("./PBDT_HH_FHSL_combine_"+year+"/BBGG_MX"+Xmass+"_MH125_cat12_m*_highpurity.parquet")
-    highpurity_zzggfiles = glob.glob("./PBDT_HH_FHSL_combine_"+year+"/ZZGG_MX"+Xmass+"_MH125_cat12_m*_highpurity.parquet")
-    lowpurity_zzggfiles = glob.glob("./PBDT_HH_FHSL_combine_"+year+"/ZZGG_MX"+Xmass+"_MH125_cat12_m*_lowpurity.parquet")
+    highpurity_sigfiles = glob.glob("./PBDT_HH_FHSL_combine_2017/CombineFHSL_MX"+Xmass+"_MH125_cat12_m*_highpurity.parquet")
+    lowpurity_sigfiles = glob.glob("./PBDT_HH_FHSL_combine_2017/CombineFHSL_MX"+Xmass+"_MH125_cat12_m*_lowpurity.parquet")
+    lowpurity_bbggfiles = glob.glob("./PBDT_HH_FHSL_combine_2017/BBGG_MX"+Xmass+"_MH125_cat12_m*_lowpurity.parquet")
+    highpurity_bbggfiles = glob.glob("./PBDT_HH_FHSL_combine_2017/BBGG_MX"+Xmass+"_MH125_cat12_m*_highpurity.parquet")
+    highpurity_zzggfiles = glob.glob("./PBDT_HH_FHSL_combine_2017/ZZGG_MX"+Xmass+"_MH125_cat12_m*_highpurity.parquet")
+    lowpurity_zzggfiles = glob.glob("./PBDT_HH_FHSL_combine_2017/ZZGG_MX"+Xmass+"_MH125_cat12_m*_lowpurity.parquet")
     
     #multiprocessing to convert parquet to root, and hadd the root files for highpurity and lowpurity WWggsiganl
     pool = multiprocessing.Pool(processes=10)
@@ -926,10 +923,10 @@ if __name__ == "__main__":
     pool.close()
     pool.join()
     tree_names = [result.get() for result in tqdm(results)]
-    command = 'hadd ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_'+year+'_combineFHSL_cat12highpurity.root ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/CombineFHSL_MX' + Xmass + '*highpurity.root'
+    command = 'hadd ./PBDT_HH_FHSL_combine_2017/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_2017_combineFHSL_cat12highpurity.root ./PBDT_HH_FHSL_combine_2017/flashgginput/CombineFHSL_MX' + Xmass + '*highpurity.root'
     print(command)
     os.system(command)
-    command = 'rm ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/CombineFHSL_MX'+Xmass+'*highpurity.root'
+    command = 'rm ./PBDT_HH_FHSL_combine_2017/flashgginput/CombineFHSL_MX'+Xmass+'*highpurity.root'
     os.system(command)
     pool = multiprocessing.Pool(processes=10)
     results = []
@@ -942,16 +939,16 @@ if __name__ == "__main__":
     pool.close()
     pool.join()
     tree_names = [result.get() for result in tqdm(results)]
-    command = 'hadd ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_'+year+'_combineFHSL_cat12lowpurity.root ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/CombineFHSL_MX' + Xmass + '*lowpurity.root'
+    command = 'hadd ./PBDT_HH_FHSL_combine_2017/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_2017_combineFHSL_cat12lowpurity.root ./PBDT_HH_FHSL_combine_2017/flashgginput/CombineFHSL_MX' + Xmass + '*lowpurity.root'
     os.system(command)
-    command = 'rm ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/CombineFHSL_MX'+Xmass+'*lowpurity.root'
+    command = 'rm ./PBDT_HH_FHSL_combine_2017/flashgginput/CombineFHSL_MX'+Xmass+'*lowpurity.root'
     os.system(command)
-    parquet_to_root(data_Acat_output_path,"./PBDT_HH_FHSL_combine_"+year+"/"+"flashgginput/MX"+Xmass+"_MH125/"+dataA_rootname,treename=dataA_treename,verbose=False)
-    parquet_to_root(data_Bcat_output_path,"./PBDT_HH_FHSL_combine_"+year+"/"+"flashgginput/MX"+Xmass+"_MH125/"+dataB_rootname,treename=dataB_treename,verbose=False)
-    parquet_to_root(data_Acat_output_path,"./PBDT_HH_FHSL_combine_"+year+"/"+"flashgginput/MX"+Xmass+"_MH125/"+dataA_rootname.replace("combineFHSL","bbgg"),treename=dataA_treename.replace("combineFHSL","bbgg"),verbose=False)
-    parquet_to_root(data_Bcat_output_path,"./PBDT_HH_FHSL_combine_"+year+"/"+"flashgginput/MX"+Xmass+"_MH125/"+dataB_rootname.replace("combineFHSL","bbgg"),treename=dataB_treename.replace("combineFHSL","bbgg"),verbose=False)
-    parquet_to_root(data_Acat_output_path,"./PBDT_HH_FHSL_combine_"+year+"/"+"flashgginput/MX"+Xmass+"_MH125/"+dataA_rootname.replace("combineFHSL","zzgg"),treename=dataA_treename.replace("combineFHSL","zzgg"),verbose=False)
-    parquet_to_root(data_Bcat_output_path,"./PBDT_HH_FHSL_combine_"+year+"/"+"flashgginput/MX"+Xmass+"_MH125/"+dataB_rootname.replace("combineFHSL","zzgg"),treename=dataB_treename.replace("combineFHSL","zzgg"),verbose=False)
+    parquet_to_root(data_Acat_output_path,"./PBDT_HH_FHSL_combine_2017/"+"flashgginput/MX"+Xmass+"_MH125/"+dataA_rootname,treename=dataA_treename,verbose=False)
+    parquet_to_root(data_Bcat_output_path,"./PBDT_HH_FHSL_combine_2017/"+"flashgginput/MX"+Xmass+"_MH125/"+dataB_rootname,treename=dataB_treename,verbose=False)
+    parquet_to_root(data_Acat_output_path,"./PBDT_HH_FHSL_combine_2017/"+"flashgginput/MX"+Xmass+"_MH125/"+dataA_rootname.replace("combineFHSL","bbgg"),treename=dataA_treename.replace("combineFHSL","bbgg"),verbose=False)
+    parquet_to_root(data_Bcat_output_path,"./PBDT_HH_FHSL_combine_2017/"+"flashgginput/MX"+Xmass+"_MH125/"+dataB_rootname.replace("combineFHSL","bbgg"),treename=dataB_treename.replace("combineFHSL","bbgg"),verbose=False)
+    parquet_to_root(data_Acat_output_path,"./PBDT_HH_FHSL_combine_2017/"+"flashgginput/MX"+Xmass+"_MH125/"+dataA_rootname.replace("combineFHSL","zzgg"),treename=dataA_treename.replace("combineFHSL","zzgg"),verbose=False)
+    parquet_to_root(data_Bcat_output_path,"./PBDT_HH_FHSL_combine_2017/"+"flashgginput/MX"+Xmass+"_MH125/"+dataB_rootname.replace("combineFHSL","zzgg"),treename=dataB_treename.replace("combineFHSL","zzgg"),verbose=False)
     #multiprocessing to convert parquet to root, and hadd the root files for highpurity and lowpurity bbggsignal
     #highpurity bbgg
     pool = multiprocessing.Pool(processes=10)
@@ -962,10 +959,10 @@ if __name__ == "__main__":
     pool.close()
     pool.join()
     tree_names = [result.get() for result in tqdm(results)]
-    command = 'hadd ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_'+year+'_bbgg_cat12highpurity.root ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/BBGG_MX' + Xmass + '*highpurity.root'
+    command = 'hadd ./PBDT_HH_FHSL_combine_2017/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_2017_bbgg_cat12highpurity.root ./PBDT_HH_FHSL_combine_2017/flashgginput/BBGG_MX' + Xmass + '*highpurity.root'
     print(command)
     os.system(command)
-    command = 'rm ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/BBGG_MX'+Xmass+'*highpurity.root'
+    command = 'rm ./PBDT_HH_FHSL_combine_2017/flashgginput/BBGG_MX'+Xmass+'*highpurity.root'
     os.system(command)
     #lowpurity bbgg
     #lowpurity signal
@@ -977,9 +974,9 @@ if __name__ == "__main__":
     pool.close()
     pool.join()
     tree_names = [result.get() for result in tqdm(results)]
-    command = 'hadd ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_'+year+'_bbgg_cat12lowpurity.root ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/BBGG_MX' + Xmass + '*lowpurity.root'
+    command = 'hadd ./PBDT_HH_FHSL_combine_2017/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_2017_bbgg_cat12lowpurity.root ./PBDT_HH_FHSL_combine_2017/flashgginput/BBGG_MX' + Xmass + '*lowpurity.root'
     os.system(command)
-    command = 'rm ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/BBGG_MX'+Xmass+'*lowpurity.root'
+    command = 'rm ./PBDT_HH_FHSL_combine_2017/flashgginput/BBGG_MX'+Xmass+'*lowpurity.root'
     os.system(command)
     #multiprocessing to convert parquet to root, and hadd the root files for highpurity and lowpurity zzggsignal
     #highpurity zzgg
@@ -991,10 +988,10 @@ if __name__ == "__main__":
     pool.close()
     pool.join()
     tree_names = [result.get() for result in tqdm(results)]
-    command = 'hadd ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_'+year+'_zzgg_cat12highpurity.root ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/ZZGG_MX' + Xmass + '*highpurity.root'
+    command = 'hadd ./PBDT_HH_FHSL_combine_2017/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_2017_zzgg_cat12highpurity.root ./PBDT_HH_FHSL_combine_2017/flashgginput/ZZGG_MX' + Xmass + '*highpurity.root'
     print(command)
     os.system(command)
-    command = 'rm ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/ZZGG_MX'+Xmass+'*highpurity.root'
+    command = 'rm ./PBDT_HH_FHSL_combine_2017/flashgginput/ZZGG_MX'+Xmass+'*highpurity.root'
     os.system(command)
     #lowpurity zzgg
     pool = multiprocessing.Pool(processes=10)
@@ -1005,12 +1002,12 @@ if __name__ == "__main__":
     pool.close()
     pool.join()
     tree_names = [result.get() for result in tqdm(results)]
-    command = 'hadd ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_'+year+'_zzgg_cat12lowpurity.root ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/ZZGG_MX' + Xmass + '*lowpurity.root'
+    command = 'hadd ./PBDT_HH_FHSL_combine_2017/flashgginput/MX'+Xmass+'_MH125/CombineFHSL_MX'+Xmass+'_MH125_2017_zzgg_cat12lowpurity.root ./PBDT_HH_FHSL_combine_2017/flashgginput/ZZGG_MX' + Xmass + '*lowpurity.root'
     print(command)
     os.system(command)
-    command = 'rm ./PBDT_HH_FHSL_combine_'+year+'/flashgginput/ZZGG_MX'+Xmass+'*lowpurity.root'
+    command = 'rm ./PBDT_HH_FHSL_combine_2017/flashgginput/ZZGG_MX'+Xmass+'*lowpurity.root'
     os.system(command)
     boundary={str(Xmass):{"cut1":cut1,"cut2":cut2,"FHSL_highpurity":FHSL_highpurity,"FHSL_lowpurity":FHSL_lowpurity,"BBGG_highpurity":bbgg_highpurity,"BBGG_lowpurity":bbgg_lowpurity,"ZZGG_highpurity":zzgg_highpurity,"ZZGG_lowpurity":zzgg_lowpurity,"highpurity_sigeff":highpurity_sigeff,"lowpurity_sigeff":lowpurity_sigeff,"highpurity_sidebandnum":highpurity_sidebandnum,"lowpurity_sidebandnum":lowpurity_sidebandnum}}
-    with open("./PBDT_HH_FHSL_combine_"+year+"/flashgginput/MX"+Xmass+"_MH125/boundaries.json", "w") as f:
+    with open("./PBDT_HH_FHSL_combine_2017/flashgginput/MX"+Xmass+"_MH125/boundaries.json", "w") as f:
         json.dump(boundary, f, indent=4)
-    plt.savefig("./PBDT_HH_FHSL_combine_"+year+"/flashgginput/MX"+Xmass+"_MH125/dnnscore.png", dpi=140)
+    plt.savefig("./PBDT_HH_FHSL_combine_2017/flashgginput/MX"+Xmass+"_MH125/dnnscore.png", dpi=140)

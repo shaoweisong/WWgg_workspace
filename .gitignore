@@ -13,7 +13,7 @@ condor_logs/
 *.0
 __init__.py
 docker_stderror
-
+condor_logs/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
